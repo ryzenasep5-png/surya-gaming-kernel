@@ -30,9 +30,17 @@ fi
 cd "$KERNEL_DIR"
 
 # ---------------------------------------------------------------------------
-log "Step 1.5/8: Integrating MemKernel (built-in mode Y)"
-curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" | bash -s Y \
-  || die "MemKernel setup script failed"
+log "Step 1.5/8: Integrating MemKernel (mode ${MEMKERNEL_MODE})"
+MEMKERNEL_MODE="${MEMKERNEL_MODE:-Y}"
+case "${MEMKERNEL_MODE}" in
+  Y|M) ;;
+  *) die "Invalid MEMKERNEL_MODE='${MEMKERNEL_MODE}' (choose Y or M)" ;;
+esac
+MEMKERNEL_SETUP="$WORK_DIR/memkernel-setup.sh"
+curl -fLSs --retry 3 --retry-delay 2 \
+  "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" \
+  -o "$MEMKERNEL_SETUP" || die "Failed to download MemKernel setup script"
+bash "$MEMKERNEL_SETUP" "$MEMKERNEL_MODE" || die "MemKernel setup script failed"
 
 # ---------------------------------------------------------------------------
 log "Step 2/8: Cloning AOSP Clang toolchain"
@@ -120,6 +128,9 @@ CONFIG_FILE="$KERNEL_DIR/out/.config"
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --disable MODULE_SIG
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --disable MODULE_SIG_FORCE
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --disable MODULE_SIG_ALL
+# Keep sanitizer instrumentation disabled for this production ARM64 build.
+# The ARM64 assembly string routines must remain the sole architecture exports.
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --disable KASAN
 
 # KernelSU-Next is enabled; SUSFS is intentionally not included in this build.
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --enable KSU
@@ -130,6 +141,65 @@ CONFIG_FILE="$KERNEL_DIR/out/.config"
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --enable DEFAULT_ZEN
 
 make "${MAKE_ARGS[@]}" olddefconfig || die "olddefconfig failed"
+
+MEMKERNEL_CONFIG="$(grep -E '^CONFIG_[A-Za-z0-9_]*MEMKERNEL=(y|m)
+  grep -qx "CONFIG_${option}=y" "$CONFIG_FILE" || die "Required config CONFIG_${option}=y was not accepted"
+done
+grep -qx "# CONFIG_MODULE_SIG is not set" "$CONFIG_FILE" || die "CONFIG_MODULE_SIG must be disabled"
+if grep -Eq '^CONFIG_MODULE_SIG_(FORCE|ALL)=y$' "$CONFIG_FILE"; then
+  die "Module signature enforcement/signing must remain disabled"
+fi
+grep -qx 'CONFIG_DEFAULT_IOSCHED="zen"' "$CONFIG_FILE" || die "Zen was not selected as the default I/O scheduler"
+log "KernelSU-Next, module settings and Zen config validated (SUSFS excluded)"
+
+log "Step 6/7: Building kernel"
+cd "$KERNEL_DIR"
+mkdir -p out
+MAKE_ARGS=(
+  O=out ARCH=arm64 CC=clang
+  CLANG_TRIPLE="$CLANG_TRIPLE"
+  CROSS_COMPILE="$CROSS_COMPILE"
+  CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
+  CROSS_COMPILE_COMPAT="$CROSS_COMPILE_COMPAT"
+  LD="$LD" AR="$AR" NM="$NM" OBJCOPY="$OBJCOPY" OBJDUMP="$OBJDUMP"
+  READELF="$READELF" OBJSIZE="$OBJSIZE" STRIP="$STRIP"
+)
+make "${MAKE_ARGS[@]}" CONFIG_DEBUG_SECTION_MISMATCH=y -j"$(nproc)" 2>&1 | tee "$OUT_DIR/build.log" || die "Kernel build failed, see build.log"
+
+IMAGE="out/arch/arm64/boot/Image.gz"
+DTB="out/arch/arm64/boot/dts/qcom/sdmmagpie.dtb"
+DTBO="out/arch/arm64/boot/dtbo.img"
+for f in "$IMAGE" "$DTB" "$DTBO"; do
+  [ -f "$f" ] || die "Expected build output missing: $f (build likely failed partway, check build.log)"
+done
+log "Kernel compiled successfully"
+
+log "Step 7/7: Packaging flashable ZIP (AnyKernel3)"
+git clone -q --depth=1 -b surya https://github.com/ragy365/AnyKernel3.git "$AK3_DIR" \
+  || die "Failed to clone AnyKernel3"
+
+cp "$IMAGE" "$DTBO" "$AK3_DIR/"
+cp "$DTB" "$AK3_DIR/dtb"
+
+cd "$AK3_DIR"
+zip -r9 "$OUT_DIR/$ZIP_NAME" . -x '.git*' 'README.md' '*placeholder' \
+  || die "Zipping failed"
+
+log "DONE. Flashable zip: $OUT_DIR/$ZIP_NAME"
+log "Verified: KernelSU-Next enabled; SUSFS intentionally excluded."
+ "$CONFIG_FILE" || true)"
+case "$MEMKERNEL_MODE" in
+  Y) [ "$MEMKERNEL_CONFIG" ] && [[ "$MEMKERNEL_CONFIG" == *=y ]] || die "MemKernel Mode Y was not enabled in .config" ;;
+  M) [ "$MEMKERNEL_CONFIG" ] && [[ "$MEMKERNEL_CONFIG" == *=m ]] || die "MemKernel Mode M was not enabled in .config" ;;
+esac
+grep -qx "# CONFIG_KASAN is not set" "$CONFIG_FILE" || die "KASAN must be disabled for this build"
+
+# The upstream stub-regulator init routine is exported, so it must not be discarded
+# with init text. Remove only its __init annotation; keep its registration/export.
+STUB_REGULATOR="$KERNEL_DIR/drivers/regulator/stub-regulator.c"
+if [ -f "$STUB_REGULATOR" ]; then
+  sed -i 's/^int __init regulator_stub_init(void)/int regulator_stub_init(void)/' "$STUB_REGULATOR"
+fi
 
 for option in MODULES MODULE_FORCE_LOAD MODULE_UNLOAD MODULE_FORCE_UNLOAD KSU; do
   grep -qx "CONFIG_${option}=y" "$CONFIG_FILE" || die "Required config CONFIG_${option}=y was not accepted"
