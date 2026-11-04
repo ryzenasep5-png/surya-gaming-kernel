@@ -1,8 +1,8 @@
-#!//bin/bash
+#!/usr/bin/env bash
 # Build script for surya-gaming-kernel (POCO X3 NFC / surya, Android 11)
 # Runs inside GitHub Actions (ubuntu-latest). Safe to run locally on a Debian/Ubuntu
 # x86_64 box too, as long as build deps from the workflow are installed.
-set -uo pipefail
+set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="${WORK_DIR:-$HOME/kbuild}"
@@ -38,7 +38,7 @@ curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/set
 # ---------------------------------------------------------------------------
 log "Step 2/8: Cloning AOSP Clang toolchain"
 if [ ! -d "$TC_DIR/bin" ]; then
-  git clone --depth=1 -b 14 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone "$TC_DIR" \
+  git clone --depth=1 -b 14 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone.git "$TC_DIR" \
     || die "Failed to clone clang toolchain"
 fi
 export PATH="$TC_DIR/bin:$PATH"
@@ -91,8 +91,22 @@ done
 [ -n "$KSU_DIR" ] || die "Could not locate KernelSU-Next source directory after setup"
 log "KernelSU-Next source found at: $KSU_DIR"
 
+# Remove duplicate ARM64 exports: these symbols are already exported by
+# their arch/arm64/lib assembly implementations.
+ARM64_KSYMS="$KERNEL_DIR/arch/arm64/kernel/arm64ksyms.c"
+for symbol in \
+  copy_page clear_page __arch_copy_from_user __arch_copy_to_user \
+  __arch_clear_user __arch_copy_in_user strchr strrchr strcmp strncmp \
+  strlen strnlen memcmp memchr memset memcpy memmove __memset __memcpy __memmove; do
+  sed -i "/^[[:space:]]*EXPORT_SYMBOL(${symbol});[[:space:]]*$/d" "$ARM64_KSYMS"
+done
+
+# The 4.14 source contains this helper without any call site.
+sed -i 's/^static void jump_label_invalidate_module_init(/static void __maybe_unused jump_label_invalidate_module_init(/' "$KERNEL_DIR/kernel/jump_label.c"
+
+
 cd "$KERNEL_DIR"
-git add -A
+git -c advice.addEmbeddedRepo=false add -A
 git -c user.email=ci@local -c user.name=ci commit -q -m "snapshot: KernelSU-Next integrated" || true
 KSU_SNAPSHOT="$(git rev-parse HEAD)"
 
@@ -134,52 +148,41 @@ if [ "$SUSFS_OK" != "1" ]; then
   warn "Continuing WITHOUT SUSFS (root via KernelSU-Next still works, but root hiding is not included in this build)."
 fi
 
-log "Step 6/8: Writing defconfig additions (KSU + SUSFS + gaming tuning)"
+log "Step 6/8: Applying kernel configuration"
 DEFCONFIG_PATH="$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG"
 [ -f "$DEFCONFIG_PATH" ] || die "defconfig not found at $DEFCONFIG_PATH"
 
-{
-  echo ""
-  echo "# --- appended by surya-gaming-kernel build.sh ---"
-  echo "# module support options from requested config"
-  echo "CONFIG_MODULES=y"
-  echo "CONFIG_MODULE_FORCE_LOAD=y"
-  echo "CONFIG_MODULE_UNLOAD=y"
-  echo "CONFIG_MODULE_FORCE_UNLOAD=y"
-  echo "CONFIG_MODULE_SIG=n"
-  echo "CONFIG_MODULE_SIG_FORCE=n"
-  echo "CONFIG_MODULE_SIG_ALL=n"
-  echo "CONFIG_KPROBES=y"
-  echo "CONFIG_KPROBE_EVENTS=y"
-  echo "CONFIG_IOSCHED_ZEN=y"
-  echo "CONFIG_DEFAULT_ZEN=y"
-  echo 'CONFIG_DEFAULT_IOSCHED="zen"'
-  echo "CONFIG_CPU_FREQ_GOV_SCHEDHORIZON=y"
-  echo "CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDHORIZON=y"
-  echo "# root"
-  echo "CONFIG_KSU=y"
-  if [ "$SUSFS_OK" = "1" ]; then
-    echo "CONFIG_KSU_SUSFS=y"
-    echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
-    echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-    echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-    echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
-    echo "CONFIG_KSU_SUSFS_SUS_SU=y"
-    echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y"
-    echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
-    echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
-    echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
-    echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
-    echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-    echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
-    echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
-    echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-  fi
-  echo "# gaming/perf extras"
-  echo "CONFIG_CPU_FREQ_GOV_PERFORMANCE=y"
-  echo "CONFIG_CPU_FREQ_GOV_POWERSAVE=y"
-} >> "$DEFCONFIG_PATH"
-log "defconfig updated at $DEFCONFIG_PATH"
+make "${MAKE_ARGS[@]}" "$DEFCONFIG" || die "defconfig generation failed"
+CONFIG_TOOL="$KERNEL_DIR/scripts/config"
+CONFIG_FILE="$KERNEL_DIR/out/.config"
+[ -x "$CONFIG_TOOL" ] || die "scripts/config is missing or not executable"
+
+# Module options requested by the user.
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --enable MODULES
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --enable MODULE_FORCE_LOAD
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --enable MODULE_UNLOAD
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --enable MODULE_FORCE_UNLOAD
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --disable MODULE_SIG
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --disable MODULE_SIG_FORCE
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --disable MODULE_SIG_ALL
+
+# Select Zen after enabling the scheduler; Kconfig resolves the choice.
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --enable IOSCHED_ZEN
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --disable DEFAULT_CFQ
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --enable DEFAULT_ZEN
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --enable KPROBES
+"$CONFIG_TOOL" --file "$CONFIG_FILE" --enable KPROBE_EVENTS
+
+make "${MAKE_ARGS[@]}" olddefconfig || die "olddefconfig failed"
+
+for option in MODULES MODULE_FORCE_LOAD MODULE_UNLOAD MODULE_FORCE_UNLOAD IOSCHED_ZEN DEFAULT_ZEN; do
+  grep -qx "CONFIG_${option}=y" "$CONFIG_FILE" || die "Required config CONFIG_${option}=y was not accepted"
+done
+for option in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL; do
+  grep -qx "# CONFIG_${option} is not set" "$CONFIG_FILE" || die "Required config CONFIG_${option}=n was not accepted"
+done
+grep -qx 'CONFIG_DEFAULT_IOSCHED="zen"' "$CONFIG_FILE" || die "Zen was not selected as the default I/O scheduler"
+log "Kernel configuration validated"
 
 log "Step 7/8: Building kernel"
 cd "$KERNEL_DIR"
@@ -194,7 +197,7 @@ MAKE_ARGS=(
   READELF="$READELF" OBJSIZE="$OBJSIZE" STRIP="$STRIP"
 )
 make "${MAKE_ARGS[@]}" "$DEFCONFIG" || die "defconfig generation failed"
-make "${MAKE_ARGS[@]}" -j"$(nproc)" 2>&1 | tee "$OUT_DIR/build.log" || die "Kernel build failed, see build.log"
+make "${MAKE_ARGS[@]}" CONFIG_DEBUG_SECTION_MISMATCH=y -j"$(nproc)" 2>&1 | tee "$OUT_DIR/build.log" || die "Kernel build failed, see build.log"
 
 IMAGE="out/arch/arm64/boot/Image.gz"
 DTB="out/arch/arm64/boot/dts/qcom/sdmmagpie.dtb"
