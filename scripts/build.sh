@@ -32,7 +32,7 @@ cd "$KERNEL_DIR"
 
 # ---------------------------------------------------------------------------
 log "Step 1.5/8: Integrating MemKernel (built-in mode Y)"
-curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" | bash -s Y \\
+curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" | bash -s Y \
   || die "MemKernel setup script failed"
 
 # ---------------------------------------------------------------------------
@@ -46,12 +46,6 @@ export PATH="$TC_DIR/bin:$PATH"
 log "Full toolchain bin/ listing:"
 ls "$TC_DIR/bin"
 
-# This package is a bare LLVM/Clang toolchain: no prefixed GNU binutils
-# (no aarch64-linux-android-ld etc). Use clang's own llvm-* tools for
-# everything instead of hunting for a GNU cross-binutils that isn't there.
-# CROSS_COMPILE / CROSS_COMPILE_ARM32 only need to be *some* plausible
-# triple string here (used for target selection), real tool dispatch is
-# forced onto the llvm-* binaries via LD/AR/NM/... below.
 export CC=clang
 export CLANG_TRIPLE="aarch64-linux-gnu-"
 export CROSS_COMPILE="aarch64-linux-gnu-"
@@ -69,10 +63,6 @@ for tool in ld.lld llvm-ar llvm-nm llvm-objcopy; do
   command -v "$tool" >/dev/null 2>&1 || warn "Expected LLVM tool '$tool' not found in toolchain PATH"
 done
 
-# Some nested Makefiles (e.g. arch/arm64/kernel/vdso32/Makefile) call
-# $(CROSS_COMPILE_ARM32)ld / ...ar / ...nm directly instead of honouring the
-# top-level LD/AR/NM overrides. Shim every GNU-style prefixed name onto the
-# real llvm-* binaries so those calls resolve no matter which prefix they use.
 SHIM_DIR="$WORK_DIR/binutils-shim"
 mkdir -p "$SHIM_DIR"
 for prefix in aarch64-linux-gnu aarch64-linux-android arm-linux-gnueabi arm-linux-androideabi; do
@@ -89,20 +79,6 @@ export PATH="$SHIM_DIR:$PATH"
 
 log "CROSS_COMPILE=$CROSS_COMPILE  CROSS_COMPILE_ARM32/COMPAT=$CROSS_COMPILE_ARM32  LD=$LD"
 
-# ---------------------------------------------------------------------------
-# NOTE: baseline tuning used to be a line-numbered patch file
-# (patches/task1_surya_defconfig.patch). That file's hunk headers were
-# malformed (bare "@@" with no line numbers) so `patch` always rejected it
-# with "Only garbage was found in the patch input" and it silently never
-# applied. Replaced with direct defconfig appends in Step 6 below, which
-# don't depend on exact line numbers in the upstream file.
-
-# ---------------------------------------------------------------------------
-# Pinned to a specific commit on KernelSU-Next's `legacy` branch (the branch
-# dedicated to non-GKI/kprobe integration) instead of always re-resolving
-# `next` HEAD at build time. This keeps builds reproducible; bump
-# KSU_NEXT_REF manually when you want to pick up newer legacy-branch commits.
-# (Checked 2026-11-02: HEAD of `legacy` was b933b1f728116a456fbebf27b6a8772a640cdf23.)
 KSU_NEXT_REF="b933b1f728116a456fbebf27b6a8772a640cdf23"
 log "Step 4/8: Integrating KernelSU-Next (non-GKI / legacy kprobe method), pinned to $KSU_NEXT_REF"
 curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s "$KSU_NEXT_REF" \
@@ -115,18 +91,11 @@ done
 [ -n "$KSU_DIR" ] || die "Could not locate KernelSU-Next source directory after setup"
 log "KernelSU-Next source found at: $KSU_DIR"
 
-# Snapshot the tree right after KSU-Next is integrated, as a local-only git
-# commit. If the SUSFS patches below fail partway, `patch` has already
-# written whatever hunks DID match (even if the overall exit is nonzero),
-# which can silently corrupt unrelated files (e.g. a header included twice).
-# Reverting to this snapshot afterward restores a known-good state without
-# also undoing the KSU-Next integration.
 cd "$KERNEL_DIR"
 git add -A
 git -c user.email=ci@local -c user.name=ci commit -q -m "snapshot: KernelSU-Next integrated" || true
 KSU_SNAPSHOT="$(git rev-parse HEAD)"
 
-# ---------------------------------------------------------------------------
 log "Step 5/8: Integrating SUSFS (root hiding) for kernel 4.14"
 SUSFS_OK=0
 git clone --depth=1 -b kernel-4.14 https://github.com/ShirkNeko/susfs4ksu.git "$SUSFS_DIR" \
@@ -165,7 +134,6 @@ if [ "$SUSFS_OK" != "1" ]; then
   warn "Continuing WITHOUT SUSFS (root via KernelSU-Next still works, but root hiding is not included in this build)."
 fi
 
-# ---------------------------------------------------------------------------
 log "Step 6/8: Writing defconfig additions (KSU + SUSFS + gaming tuning)"
 DEFCONFIG_PATH="$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG"
 [ -f "$DEFCONFIG_PATH" ] || die "defconfig not found at $DEFCONFIG_PATH"
@@ -173,10 +141,11 @@ DEFCONFIG_PATH="$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG"
 {
   echo ""
   echo "# --- appended by surya-gaming-kernel build.sh ---"
-  echo "# baseline gaming tuning (modules, kprobes, zen I/O sched, schedhorizon gov)"
+  echo "# module support options from requested config"
   echo "CONFIG_MODULES=y"
   echo "CONFIG_MODULE_FORCE_LOAD=y"
   echo "CONFIG_MODULE_UNLOAD=y"
+  echo "CONFIG_MODULE_FORCE_UNLOAD=y"
   echo "CONFIG_MODULE_SIG=n"
   echo "CONFIG_MODULE_SIG_FORCE=n"
   echo "CONFIG_MODULE_SIG_ALL=n"
@@ -184,15 +153,12 @@ DEFCONFIG_PATH="$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG"
   echo "CONFIG_KPROBE_EVENTS=y"
   echo "CONFIG_IOSCHED_ZEN=y"
   echo "CONFIG_DEFAULT_ZEN=y"
-  echo "CONFIG_DEFAULT_IOSCHED=\"zen\""
+  echo "CONFIG_DEFAULT_IOSCHED=\\"zen\\""
   echo "CONFIG_CPU_FREQ_GOV_SCHEDHORIZON=y"
   echo "CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDHORIZON=y"
   echo "# root"
   echo "CONFIG_KSU=y"
   if [ "$SUSFS_OK" = "1" ]; then
-    # Full option set actually present across both susfs4ksu kernel-4.14
-    # patches (50_add_susfs_in_kernel-4.14.patch + KernelSU/10_enable_susfs_for_ksu.patch),
-    # verified against the patches themselves, not guessed.
     echo "CONFIG_KSU_SUSFS=y"
     echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
     echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
@@ -215,7 +181,6 @@ DEFCONFIG_PATH="$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG"
 } >> "$DEFCONFIG_PATH"
 log "defconfig updated at $DEFCONFIG_PATH"
 
-# ---------------------------------------------------------------------------
 log "Step 7/8: Building kernel"
 cd "$KERNEL_DIR"
 mkdir -p out
@@ -239,7 +204,6 @@ for f in "$IMAGE" "$DTB" "$DTBO"; do
 done
 log "Kernel compiled successfully"
 
-# ---------------------------------------------------------------------------
 log "Step 8/8: Packaging flashable ZIP (AnyKernel3)"
 git clone -q --depth=1 -b surya https://github.com/ragy365/AnyKernel3.git "$AK3_DIR" \
   || die "Failed to clone AnyKernel3"
