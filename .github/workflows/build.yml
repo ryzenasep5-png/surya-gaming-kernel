@@ -16,9 +16,6 @@ SUSFS_DIR="$WORK_DIR/susfs"
 OUT_DIR="$ROOT_DIR/out"
 ZIP_NAME="surya-gaming-kernel-$(date +%Y%m%d).zip"
 
-# Optional driver hack repo integration
-KERNEL_DRIVER_HACK_REPO="${KERNEL_DRIVER_HACK_REPO:-https://github.com/SMlc666/Kernel_driver_hack.git}"
-KERNEL_DRIVER_HACK_DIR="$WORK_DIR/kernel_driver_hack"
 
 log()  { echo -e "\n\033[1;32m[*] $*\033[0m"; }
 warn() { echo -e "\n\033[1;33m[!] $*\033[0m"; }
@@ -165,37 +162,9 @@ if [ "$SUSFS_OK" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# NEW: optional integration for external driver hack repo
-log "Step 5.5/8: Integrating external driver hack repo (Kernel_driver_hack)"
-if [ ! -d "$KERNEL_DRIVER_HACK_DIR/.git" ]; then
-  git clone --depth=1 "$KERNEL_DRIVER_HACK_REPO" "$KERNEL_DRIVER_HACK_DIR" \
-    || warn "Driver hack repository clone failed; continuing without external driver patches"
-fi
-
-if [ -d "$KERNEL_DRIVER_HACK_DIR" ]; then
-  log "Driver hack repo found at: $KERNEL_DRIVER_HACK_DIR"
-
-  # Apply all patch files found inside the driver hack repo
-  while IFS= read -r -d '' patch_file; do
-    log "Applying external patch: $(basename "$patch_file")"
-    (cd "$KERNEL_DIR" && patch -p1 --forward --fuzz=5 < "$patch_file") || warn "Patch failed or was already applied: $patch_file"
-  done < <(find "$KERNEL_DRIVER_HACK_DIR" -type f -name "*.patch" -print0 2>/dev/null)
-
-  # Copy common source trees if present
-  for src_dir in "drivers" "kernel" "include" "arch" "techpack"; do
-    if [ -d "$KERNEL_DRIVER_HACK_DIR/$src_dir" ]; then
-      log "Copying $src_dir from driver hack repo into kernel tree"
-      cp -a "$KERNEL_DRIVER_HACK_DIR/$src_dir/." "$KERNEL_DIR/$src_dir/" 2>/dev/null \
-        || warn "Could not copy $src_dir from driver hack repo"
-    fi
-  done
-
-  # If repo has a custom config file, append it to the defconfig
-  if [ -f "$KERNEL_DRIVER_HACK_DIR/custom.config" ]; then
-    log "Appending custom.config from driver hack repo into defconfig"
-    cat "$KERNEL_DRIVER_HACK_DIR/custom.config" >> "$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG"
-  fi
-fi
+log "Step 5.5/8: Integrating MemKernel (built-in mode Y)"
+curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" | bash -s Y \
+  || die "MemKernel setup script failed"
 
 # ---------------------------------------------------------------------------
 log "Step 6/8: Writing defconfig additions (KSU + SUSFS + gaming tuning)"
