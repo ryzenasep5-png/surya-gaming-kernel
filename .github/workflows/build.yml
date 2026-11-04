@@ -2,6 +2,15 @@ name: Build Surya Gaming Kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      memkernel_mode:
+        description: "MemKernel integration mode"
+        required: true
+        type: choice
+        options:
+          - Y
+          - M
+        default: Y
   push:
     branches:
       - main
@@ -34,6 +43,8 @@ jobs:
             libncurses-dev libssl-dev lz4 python3 rsync unzip zip zlib1g-dev
 
       - name: Build kernel
+        env:
+          MEMKERNEL_MODE: ${{ inputs.memkernel_mode || 'Y' }}
         run: bash scripts/build.sh
 
       - name: Upload flashable ZIP and build log
