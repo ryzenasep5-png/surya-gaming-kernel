@@ -1,4 +1,4 @@
-#!/bin/bash
+#!//bin/bash
 # Build script for surya-gaming-kernel (POCO X3 NFC / surya, Android 11)
 # Runs inside GitHub Actions (ubuntu-latest). Safe to run locally on a Debian/Ubuntu
 # x86_64 box too, as long as build deps from the workflow are installed.
