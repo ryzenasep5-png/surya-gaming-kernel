@@ -30,8 +30,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ca-certificates cpio curl device-tree-compiler \
-            flex git libelf-dev libncurses-dev libssl-dev lz4 python3 rsync unzip zip \
-            zlib1g-dev
+            flex gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi git libelf-dev \
+            libncurses-dev libssl-dev lz4 python3 rsync unzip zip zlib1g-dev
 
       - name: Build kernel
         run: bash scripts/build.sh
