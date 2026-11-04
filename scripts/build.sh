@@ -31,6 +31,11 @@ fi
 cd "$KERNEL_DIR"
 
 # ---------------------------------------------------------------------------
+log "Step 1.5/8: Integrating MemKernel (built-in mode Y)"
+curl -LSs "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main/kernel/setup.sh" | bash -s Y \\
+  || die "MemKernel setup script failed"
+
+# ---------------------------------------------------------------------------
 log "Step 2/8: Cloning AOSP Clang toolchain"
 if [ ! -d "$TC_DIR/bin" ]; then
   git clone --depth=1 -b 14 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone "$TC_DIR" \
