@@ -12,7 +12,6 @@ KERNEL_DIR="$WORK_DIR/kernel"
 DEFCONFIG="surya_defconfig"
 TC_DIR="$WORK_DIR/clang"
 AK3_DIR="$WORK_DIR/AnyKernel3"
-SUSFS_DIR="$WORK_DIR/susfs"
 OUT_DIR="$ROOT_DIR/out"
 ZIP_NAME="surya-gaming-kernel-$(date +%Y%m%d).zip"
 
@@ -102,64 +101,10 @@ done
 [ -n "$KSU_DIR" ] || die "Could not locate KernelSU-Next source directory after setup"
 log "KernelSU-Next source found at: $KSU_DIR"
 
-# Remove duplicate ARM64 exports: these symbols are already exported by
-# their arch/arm64/lib assembly implementations.
-ARM64_KSYMS="$KERNEL_DIR/arch/arm64/kernel/arm64ksyms.c"
-for symbol in \
-  copy_page clear_page __arch_copy_from_user __arch_copy_to_user \
-  __arch_clear_user __arch_copy_in_user strchr strrchr strcmp strncmp \
-  strlen strnlen memcmp memchr memset memcpy memmove __memset __memcpy __memmove; do
-  sed -i "/^[[:space:]]*EXPORT_SYMBOL(${symbol});[[:space:]]*$/d" "$ARM64_KSYMS"
-done
-
-# The 4.14 source contains this helper without any call site.
-sed -i 's/^static void jump_label_invalidate_module_init(/static void __maybe_unused jump_label_invalidate_module_init(/' "$KERNEL_DIR/kernel/jump_label.c"
 
 
 cd "$KERNEL_DIR"
-git -c advice.addEmbeddedRepo=false add -A
-git -c user.email=ci@local -c user.name=ci commit -q -m "snapshot: KernelSU-Next integrated" || true
-KSU_SNAPSHOT="$(git rev-parse HEAD)"
-
-log "Step 5/8: Integrating SUSFS (root hiding) for kernel 4.14"
-SUSFS_OK=0
-git clone --depth=1 -b kernel-4.14 https://github.com/ShirkNeko/susfs4ksu.git "$SUSFS_DIR" \
-  || die "Failed to clone susfs4ksu"
-
-revert_susfs_attempt() {
-  warn "Reverting kernel tree to the post-KSU-Next snapshot (discarding partial SUSFS changes)"
-  cd "$KERNEL_DIR"
-  git checkout -q "$KSU_SNAPSHOT" -- .
-  git clean -fdq
-}
-
-cp "$SUSFS_DIR/kernel_patches/fs/susfs.c" "$KERNEL_DIR/fs/susfs.c" \
-  || die "Failed to copy susfs.c"
-mkdir -p "$KERNEL_DIR/include/linux"
-cp "$SUSFS_DIR"/kernel_patches/include/linux/susfs*.h "$KERNEL_DIR/include/linux/" \
-  || die "Failed to copy susfs headers"
-
-cd "$KERNEL_DIR"
-if patch -p1 --fuzz=5 --no-backup-if-mismatch < "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.14.patch" \
-   && [ "$(find . -name '*.rej' | wc -l)" = "0" ]; then
-  log "Core SUSFS kernel patch applied cleanly"
-  if patch -p1 --fuzz=5 --no-backup-if-mismatch < "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" \
-     && [ "$(find . -name '*.rej' | wc -l)" = "0" ]; then
-    log "SUSFS<->KernelSU-Next hook patch applied cleanly"
-    SUSFS_OK=1
-  else
-    warn "SUSFS<->KernelSU-Next hook patch had rejects."
-    revert_susfs_attempt
-  fi
-else
-  warn "Core SUSFS patch had rejects against this kernel tree."
-  revert_susfs_attempt
-fi
-if [ "$SUSFS_OK" != "1" ]; then
-  die "SUSFS integration failed; refusing to build or publish a ZIP without SUSFS"
-fi
-
-log "Step 6/8: Applying and validating kernel configuration"
+log "Step 5/7: Applying and validating kernel configuration"
 DEFCONFIG_PATH="$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG"
 [ -f "$DEFCONFIG_PATH" ] || die "defconfig not found at $DEFCONFIG_PATH"
 
@@ -176,18 +121,8 @@ CONFIG_FILE="$KERNEL_DIR/out/.config"
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --disable MODULE_SIG_FORCE
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --disable MODULE_SIG_ALL
 
-# Both root framework and SUSFS are mandatory for this release.
+# KernelSU-Next is enabled; SUSFS is intentionally not included in this build.
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --enable KSU
-"$CONFIG_TOOL" --file "$CONFIG_FILE" --enable KSU_SUSFS
-for option in \
-  KSU_SUSFS_HAS_MAGIC_MOUNT KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT \
-  KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
-  KSU_SUSFS_SUS_KSTAT KSU_SUSFS_TRY_UMOUNT \
-  KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT KSU_SUSFS_SPOOF_UNAME \
-  KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-  KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_SU; do
-  "$CONFIG_TOOL" --file "$CONFIG_FILE" --enable "$option"
-done
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --enable KPROBES
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --enable KPROBE_EVENTS
 "$CONFIG_TOOL" --file "$CONFIG_FILE" --enable IOSCHED_ZEN
@@ -196,7 +131,7 @@ done
 
 make "${MAKE_ARGS[@]}" olddefconfig || die "olddefconfig failed"
 
-for option in MODULES MODULE_FORCE_LOAD MODULE_UNLOAD MODULE_FORCE_UNLOAD KSU KSU_SUSFS; do
+for option in MODULES MODULE_FORCE_LOAD MODULE_UNLOAD MODULE_FORCE_UNLOAD KSU; do
   grep -qx "CONFIG_${option}=y" "$CONFIG_FILE" || die "Required config CONFIG_${option}=y was not accepted"
 done
 grep -qx "# CONFIG_MODULE_SIG is not set" "$CONFIG_FILE" || die "CONFIG_MODULE_SIG must be disabled"
@@ -204,9 +139,9 @@ if grep -Eq '^CONFIG_MODULE_SIG_(FORCE|ALL)=y$' "$CONFIG_FILE"; then
   die "Module signature enforcement/signing must remain disabled"
 fi
 grep -qx 'CONFIG_DEFAULT_IOSCHED="zen"' "$CONFIG_FILE" || die "Zen was not selected as the default I/O scheduler"
-log "KernelSU-Next, SUSFS, module settings and Zen config validated"
+log "KernelSU-Next, module settings and Zen config validated (SUSFS excluded)"
 
-log "Step 7/8: Building kernel"
+log "Step 6/7: Building kernel"
 cd "$KERNEL_DIR"
 mkdir -p out
 MAKE_ARGS=(
@@ -218,7 +153,6 @@ MAKE_ARGS=(
   LD="$LD" AR="$AR" NM="$NM" OBJCOPY="$OBJCOPY" OBJDUMP="$OBJDUMP"
   READELF="$READELF" OBJSIZE="$OBJSIZE" STRIP="$STRIP"
 )
-make "${MAKE_ARGS[@]}" "$DEFCONFIG" || die "defconfig generation failed"
 make "${MAKE_ARGS[@]}" CONFIG_DEBUG_SECTION_MISMATCH=y -j"$(nproc)" 2>&1 | tee "$OUT_DIR/build.log" || die "Kernel build failed, see build.log"
 
 IMAGE="out/arch/arm64/boot/Image.gz"
@@ -229,7 +163,7 @@ for f in "$IMAGE" "$DTB" "$DTBO"; do
 done
 log "Kernel compiled successfully"
 
-log "Step 8/8: Packaging flashable ZIP (AnyKernel3)"
+log "Step 7/7: Packaging flashable ZIP (AnyKernel3)"
 git clone -q --depth=1 -b surya https://github.com/ragy365/AnyKernel3.git "$AK3_DIR" \
   || die "Failed to clone AnyKernel3"
 
@@ -241,4 +175,4 @@ zip -r9 "$OUT_DIR/$ZIP_NAME" . -x '.git*' 'README.md' '*placeholder' \
   || die "Zipping failed"
 
 log "DONE. Flashable zip: $OUT_DIR/$ZIP_NAME"
-log "Verified: KernelSU-Next and SUSFS are mandatory build components."
+log "Verified: KernelSU-Next enabled; SUSFS intentionally excluded."
