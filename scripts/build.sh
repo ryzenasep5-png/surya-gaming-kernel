@@ -178,9 +178,52 @@ make "${MAKE_ARGS[@]}" olddefconfig || die "olddefconfig failed"
 for option in MODULES MODULE_FORCE_LOAD MODULE_UNLOAD MODULE_FORCE_UNLOAD IOSCHED_ZEN DEFAULT_ZEN; do
   grep -qx "CONFIG_${option}=y" "$CONFIG_FILE" || die "Required config CONFIG_${option}=y was not accepted"
 done
-for option in MODULE_SIG MODULE_SIG_FORCE MODULE_SIG_ALL; do
-  grep -qx "# CONFIG_${option} is not set" "$CONFIG_FILE" || die "Required config CONFIG_${option}=n was not accepted"
+grep -qx "# CONFIG_MODULE_SIG is not set" "$CONFIG_FILE" || die "CONFIG_MODULE_SIG must be disabled"
+if grep -Eq '^CONFIG_MODULE_SIG_(FORCE|ALL)=y
+grep -qx 'CONFIG_DEFAULT_IOSCHED="zen"' "$CONFIG_FILE" || die "Zen was not selected as the default I/O scheduler"
+log "Kernel configuration validated"
+
+log "Step 7/8: Building kernel"
+cd "$KERNEL_DIR"
+mkdir -p out
+MAKE_ARGS=(
+  O=out ARCH=arm64 CC=clang
+  CLANG_TRIPLE="$CLANG_TRIPLE"
+  CROSS_COMPILE="$CROSS_COMPILE"
+  CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
+  CROSS_COMPILE_COMPAT="$CROSS_COMPILE_COMPAT"
+  LD="$LD" AR="$AR" NM="$NM" OBJCOPY="$OBJCOPY" OBJDUMP="$OBJDUMP"
+  READELF="$READELF" OBJSIZE="$OBJSIZE" STRIP="$STRIP"
+)
+make "${MAKE_ARGS[@]}" "$DEFCONFIG" || die "defconfig generation failed"
+make "${MAKE_ARGS[@]}" CONFIG_DEBUG_SECTION_MISMATCH=y -j"$(nproc)" 2>&1 | tee "$OUT_DIR/build.log" || die "Kernel build failed, see build.log"
+
+IMAGE="out/arch/arm64/boot/Image.gz"
+DTB="out/arch/arm64/boot/dts/qcom/sdmmagpie.dtb"
+DTBO="out/arch/arm64/boot/dtbo.img"
+for f in "$IMAGE" "$DTB" "$DTBO"; do
+  [ -f "$f" ] || die "Expected build output missing: $f (build likely failed partway, check build.log)"
 done
+log "Kernel compiled successfully"
+
+log "Step 8/8: Packaging flashable ZIP (AnyKernel3)"
+git clone -q --depth=1 -b surya https://github.com/ragy365/AnyKernel3.git "$AK3_DIR" \
+  || die "Failed to clone AnyKernel3"
+
+cp "$IMAGE" "$DTBO" "$AK3_DIR/"
+cp "$DTB" "$AK3_DIR/dtb"
+
+cd "$AK3_DIR"
+zip -r9 "$OUT_DIR/$ZIP_NAME" . -x '.git*' 'README.md' '*placeholder' \
+  || die "Zipping failed"
+
+log "DONE. Flashable zip: $OUT_DIR/$ZIP_NAME"
+if [ "$SUSFS_OK" != "1" ]; then
+  warn "Reminder: SUSFS did not apply cleanly on this build, see warnings above. Root (KernelSU-Next) itself should still work."
+fi
+ "$CONFIG_FILE"; then
+  die "Module signature enforcement/signing must remain disabled"
+fi
 grep -qx 'CONFIG_DEFAULT_IOSCHED="zen"' "$CONFIG_FILE" || die "Zen was not selected as the default I/O scheduler"
 log "Kernel configuration validated"
 
