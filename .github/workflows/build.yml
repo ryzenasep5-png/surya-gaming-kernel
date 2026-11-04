@@ -9,7 +9,7 @@ on:
         type: choice
         options:
           - Y
-          - M
+          - N
         default: Y
   push:
     branches:
