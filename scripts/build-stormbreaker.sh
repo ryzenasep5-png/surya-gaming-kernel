@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# StormBreaker v8 (POCO X3 NFC / surya) + KernelSU-Next + SUSFS + MemKernel
+# StormBreaker v8 (POCO X3 NFC / surya, kernel 4.14.117) +
+# KernelSU-Next v1.1.1 + SUSFS 1.4.2 + MemKernel.
 # Dijalankan di GitHub Actions ubuntu-22.04.
 set -euo pipefail
 
@@ -8,13 +9,11 @@ WORK_DIR="${WORK_DIR:-$HOME/kbuild-sb}"
 KERNEL_REPO="${KERNEL_REPO:-https://github.com/stormbreaker-project/kernel_xiaomi_surya.git}"
 KERNEL_REF="${KERNEL_REF:-v8}"
 DEFCONFIG="${DEFCONFIG:-surya-perf_defconfig}"
-KSU_NEXT_REF="${KSU_NEXT_REF:-v3.4.2}"
-SUSFS_REPO="${SUSFS_REPO:-https://github.com/ShirkNeko/susfs4ksu.git}"
-SUSFS_BRANCH="${SUSFS_BRANCH:-kernel-4.14}"
+KSU_NEXT_REF="${KSU_NEXT_REF:-v1.1.1}"
 MEMKERNEL_MODE="${MEMKERNEL_MODE:-Y}"
 
+PATCH_DIR="$ROOT_DIR/patches/susfs"
 KERNEL_DIR="$WORK_DIR/kernel"
-SUSFS_DIR="$WORK_DIR/susfs4ksu"
 TC_DIR="$WORK_DIR/clang"
 AK3_DIR="$WORK_DIR/AnyKernel3"
 OUT_DIR="$ROOT_DIR/out"
@@ -33,7 +32,7 @@ if [ ! -d "$KERNEL_DIR/.git" ]; then
     || die "gagal clone kernel"
 fi
 cd "$KERNEL_DIR"
-grep -m1 -A2 '^VERSION' Makefile
+grep -m1 -A3 '^VERSION' Makefile | head -4
 
 # ---------------------------------------------------------------- 2. clang
 log "2/9: Siapkan Clang"
@@ -50,7 +49,8 @@ export CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
 SHIM_DIR="$WORK_DIR/binutils-shim"; mkdir -p "$SHIM_DIR"
 for prefix in aarch64-linux-gnu aarch64-linux-android arm-linux-gnueabi arm-linux-androideabi; do
   for t in ld ar nm objcopy objdump strip readelf size; do
-    src="$(command -v llvm-$t 2>/dev/null || command -v $( [ "$t" = ld ] && echo ld.lld || echo llvm-$t))"
+    src="$(command -v llvm-$t 2>/dev/null || true)"
+    [ -z "$src" ] && [ "$t" = ld ] && src="$(command -v ld.lld 2>/dev/null || true)"
     [ -n "$src" ] && ln -sf "$src" "$SHIM_DIR/${prefix}-${t}"
   done
 done
@@ -61,49 +61,30 @@ log "3/9: Integrasi KernelSU-Next $KSU_NEXT_REF"
 curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
   | bash -s "$KSU_NEXT_REF" || die "KernelSU-Next setup gagal"
 
-KSU_DIR=""
-for cand in "$KERNEL_DIR/KernelSU-Next" "$KERNEL_DIR/KernelSU"; do
-  [ -d "$cand" ] && KSU_DIR="$cand" && break
-done
-[ -n "$KSU_DIR" ] || die "folder KernelSU-Next tidak ditemukan"
-log "KSU source: $KSU_DIR"
+KSU_ROOT="$KERNEL_DIR/KernelSU-Next"
+[ -d "$KSU_ROOT/kernel" ] || die "folder KernelSU-Next tidak ditemukan"
+log "KSU source: $KSU_ROOT/kernel -> drivers/kernelsu"
 
 # ---------------------------------------------------------------- 4. SUSFS
-log "4/9: Integrasi SUSFS ($SUSFS_BRANCH)"
-git clone -q --depth=1 -b "$SUSFS_BRANCH" "$SUSFS_REPO" "$SUSFS_DIR" || die "gagal clone SUSFS"
+log "4/9: Integrasi SUSFS 1.4.2 (kernel + KSU)"
+[ -f "$PATCH_DIR/50_add_susfs_in_kernel-4.14.patch" ] || die "patch SUSFS kernel hilang"
+[ -f "$PATCH_DIR/10_enable_susfs_for_ksu-next.patch" ] || die "patch SUSFS ksu hilang"
 
-cp "$SUSFS_DIR/kernel_patches/fs/susfs.c" "$KERNEL_DIR/fs/"
-cp "$SUSFS_DIR/kernel_patches/include/linux/susfs.h" "$KERNEL_DIR/include/linux/"
-[ -f "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" ] && \
-  cp "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" "$KERNEL_DIR/include/linux/"
-
-# Kernel 4.14 belum punya include/linux/bits.h (baru ada di 5.x); SUSFS cuma butuh BIT().
-if [ ! -f "$KERNEL_DIR/include/linux/bits.h" ]; then
-  log "tambah shim include/linux/bits.h (4.14)"
-  cat > "$KERNEL_DIR/include/linux/bits.h" <<'EOF'
-#ifndef _LINUX_BITS_H
-#define _LINUX_BITS_H
-#include <linux/bitops.h>
-#ifndef BIT_ULL
-#define BIT_ULL(nr) (1ULL << (nr))
-#endif
-#endif
-EOF
-fi
-
+# kernel-side: susfs.c + header + fs patch
+cp "$PATCH_DIR/susfs.c" "$KERNEL_DIR/fs/"
+cp "$PATCH_DIR/susfs.h" "$KERNEL_DIR/include/linux/"
 cd "$KERNEL_DIR"
 log "patch kernel SUSFS"
-patch -p1 --batch --forward --fuzz=3 < "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.14.patch" \
-  || warn "ada hunk kernel SUSFS yang ditolak (.rej)"
-find . -name '*.rej' -maxdepth 4 2>/dev/null | head -20 || true
+patch -p1 --batch --forward < "$PATCH_DIR/50_add_susfs_in_kernel-4.14.patch" \
+  || die "patch kernel SUSFS gagal"
+grep -q 'CONFIG_KSU_SUSFS' fs/Makefile || die "SUSFS tidak terpasang di fs/Makefile"
 
+# ksu-side: patch KSU-Next (dari root repo KSU-Next)
 log "patch KernelSU-Next untuk SUSFS"
-cd "$KSU_DIR"
-patch -p1 --batch --forward --fuzz=3 < "$SUSFS_DIR/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" \
-  || warn "ada hunk KSU SUSFS yang ditolak (.rej)"
-find . -name '*.rej' -maxdepth 3 2>/dev/null | head -20 || true
-
-grep -q 'susfs' "$KERNEL_DIR/fs/Makefile" || die "SUSFS tidak terpasang di fs/Makefile"
+cd "$KSU_ROOT"
+patch -p1 --batch --forward < "$PATCH_DIR/10_enable_susfs_for_ksu-next.patch" \
+  || die "patch KSU SUSFS gagal"
+grep -q 'KSU_SUSFS' kernel/Kconfig || die "KSU_SUSFS tidak ada di Kconfig"
 
 # ---------------------------------------------------------------- 5. MemKernel
 log "5/9: Integrasi MemKernel (mode $MEMKERNEL_MODE)"
@@ -112,7 +93,7 @@ curl -fLSs --retry 3 "https://raw.githubusercontent.com/Poko-Apps/MemKernel/main
   | bash -s "$MEMKERNEL_MODE" || die "MemKernel setup gagal"
 
 # ---------------------------------------------------------------- 6. config
-log "6/9: Konfigurasi (defconfig $DEFCONFIG + tuning gaming)"
+log "6/9: Konfigurasi (defconfig $DEFCONFIG + tuning ringan/gaming)"
 MAKE_ARGS=(O=out ARCH=arm64 SUBARCH=arm64)
 make "${MAKE_ARGS[@]}" "$DEFCONFIG" || die "defconfig gagal"
 
@@ -127,32 +108,17 @@ sc --enable MODULES
 sc --disable MODULE_SIG
 sc --disable MODULE_SIG_ALL
 sc --disable MODULE_SIG_FORCE
-sc --enable THREAD_INFO_IN_TASK
-# SUSFS
+# SUSFS (1.4.2: tanpa SUS_SU yang tidak kompatibel dengan KSU-Next v1.1.1)
 for o in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT \
-         KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-         KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP; do
+         KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG; do
   sc --enable "$o"
 done
 # ringan & gaming
-sc --disable DEBUG_INFO
-sc --disable DEBUG_KERNEL
-sc --disable SLUB_DEBUG
-sc --disable KASAN
-sc --enable ZRAM
-sc --enable ZRAM_LZ4_COMPRESS
-sc --enable CRYPTO_LZ4
-sc --enable LZ4_COMPRESS
-sc --enable LZ4_DECOMPRESS
 sc --enable TCP_CONG_BBR
 sc --enable DEFAULT_BBR
 sc --set-str DEFAULT_TCP_CONG "bbr"
-sc --enable IOSCHED_ZEN
-sc --disable DEFAULT_CFQ
-sc --enable DEFAULT_ZEN
-sc --enable CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
-sc --set-str DEFAULT_IOSCHED "zen"
-sc --set-str LOCALVERSION "-StormBreaker-KSUNext"
+sc --set-str ZRAM_DEFAULT_COMP_ALGORITHM "lz4"
+sc --set-str LOCALVERSION "-StormBreaker-KSUNext-SUSFS"
 
 make "${MAKE_ARGS[@]}" olddefconfig || die "olddefconfig gagal"
 

@@ -13,6 +13,7 @@ on:
     paths:
       - "scripts/build-stormbreaker.sh"
       - ".github/workflows/build-stormbreaker.yml"
+      - "patches/**"
 
 permissions:
   contents: read
