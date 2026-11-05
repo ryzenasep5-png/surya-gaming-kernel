@@ -111,11 +111,12 @@ sc --enable MODULES
 sc --disable MODULE_SIG
 sc --disable MODULE_SIG_ALL
 sc --disable MODULE_SIG_FORCE
-# SUSFS (1.4.2: tanpa SUS_SU yang tidak kompatibel dengan KSU-Next v1.1.1)
+# SUSFS (1.4.2: SUS_SU dinonaktifkan — tidak kompatibel dengan KSU-Next v1.1.1)
 for o in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT \
          KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG; do
   sc --enable "$o"
 done
+sc --disable KSU_SUSFS_SUS_SU
 # ringan & gaming
 sc --enable TCP_CONG_BBR
 sc --enable DEFAULT_BBR
