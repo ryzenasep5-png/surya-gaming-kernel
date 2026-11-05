@@ -77,6 +77,20 @@ cp "$SUSFS_DIR/kernel_patches/include/linux/susfs.h" "$KERNEL_DIR/include/linux/
 [ -f "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" ] && \
   cp "$SUSFS_DIR/kernel_patches/include/linux/susfs_def.h" "$KERNEL_DIR/include/linux/"
 
+# Kernel 4.14 belum punya include/linux/bits.h (baru ada di 5.x); SUSFS cuma butuh BIT().
+if [ ! -f "$KERNEL_DIR/include/linux/bits.h" ]; then
+  log "tambah shim include/linux/bits.h (4.14)"
+  cat > "$KERNEL_DIR/include/linux/bits.h" <<'EOF'
+#ifndef _LINUX_BITS_H
+#define _LINUX_BITS_H
+#include <linux/bitops.h>
+#ifndef BIT_ULL
+#define BIT_ULL(nr) (1ULL << (nr))
+#endif
+#endif
+EOF
+fi
+
 cd "$KERNEL_DIR"
 log "patch kernel SUSFS"
 patch -p1 --batch --forward --fuzz=3 < "$SUSFS_DIR/kernel_patches/50_add_susfs_in_kernel-4.14.patch" \
@@ -113,6 +127,7 @@ sc --enable MODULES
 sc --disable MODULE_SIG
 sc --disable MODULE_SIG_ALL
 sc --disable MODULE_SIG_FORCE
+sc --enable THREAD_INFO_IN_TASK
 # SUSFS
 for o in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT \
          KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
