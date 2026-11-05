@@ -70,9 +70,10 @@ log "4/9: Integrasi SUSFS 1.4.2 (kernel + KSU)"
 [ -f "$PATCH_DIR/50_add_susfs_in_kernel-4.14.patch" ] || die "patch SUSFS kernel hilang"
 [ -f "$PATCH_DIR/10_enable_susfs_for_ksu-next.patch" ] || die "patch SUSFS ksu hilang"
 
-# kernel-side: susfs.c + header + fs patch
+# kernel-side: susfs.c + headers + fs patch
 cp "$PATCH_DIR/susfs.c" "$KERNEL_DIR/fs/"
 cp "$PATCH_DIR/susfs.h" "$KERNEL_DIR/include/linux/"
+cp "$PATCH_DIR/sus_su.h" "$KERNEL_DIR/include/linux/"
 cd "$KERNEL_DIR"
 log "patch kernel SUSFS"
 patch -p1 --batch --forward < "$PATCH_DIR/50_add_susfs_in_kernel-4.14.patch" \
@@ -85,6 +86,8 @@ cd "$KSU_ROOT"
 patch -p1 --batch --forward < "$PATCH_DIR/10_enable_susfs_for_ksu-next.patch" \
   || die "patch KSU SUSFS gagal"
 grep -q 'KSU_SUSFS' kernel/Kconfig || die "KSU_SUSFS tidak ada di Kconfig"
+# sucompat.h dibutuhkan oleh sus_su.h (di-include susfs.c)
+cp "$PATCH_DIR/sucompat.h" "$KSU_ROOT/kernel/"
 
 # ---------------------------------------------------------------- 5. MemKernel
 log "5/9: Integrasi MemKernel (mode $MEMKERNEL_MODE)"
