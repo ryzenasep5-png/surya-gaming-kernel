@@ -1,0 +1,54 @@
+name: Build StormBreaker v8 (surya)
+
+on:
+  workflow_dispatch:
+    inputs:
+      memkernel_mode:
+        description: "Mode MemKernel (Y = built-in, M = module, N = tanpa)"
+        type: choice
+        options: [Y, M, N]
+        default: Y
+  push:
+    branches: [stormbreaker-v8]
+    paths:
+      - "scripts/build-stormbreaker.sh"
+      - ".github/workflows/build-stormbreaker.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sb-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates cpio curl device-tree-compiler \
+            flex gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi git libelf-dev \
+            libncurses-dev libssl-dev lz4 python3 rsync unzip zip zlib1g-dev \
+            patch
+
+      - name: Build kernel
+        env:
+          MEMKERNEL_MODE: ${{ inputs.memkernel_mode || 'Y' }}
+        run: bash scripts/build-stormbreaker.sh
+
+      - name: Upload flashable ZIP and build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stormbreaker-v8-surya
+          path: |
+            out/*.zip
+            out/build.log
+          if-no-files-found: warn
+          retention-days: 14
