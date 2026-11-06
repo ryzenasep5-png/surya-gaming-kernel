@@ -133,7 +133,11 @@ jobs:
         working-directory: kernel
         run: |
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          # Proton Clang ships an old target linker named `ld`; keep host
+          # Kconfig utilities on Ubuntu's native binutils (RELr glibc support).
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CC="$GITHUB_WORKSPACE/clang/bin/clang" \
+            HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++ HOSTLD=/usr/bin/ld.bfd \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
             DTC_EXT=/usr/bin/dtc \
