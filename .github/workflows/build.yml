@@ -99,6 +99,8 @@ jobs:
             < ../nongki/Patches/Patch/susfs_patch_to_4.14.patch || true
           patch --batch --fuzz=3 --no-backup-if-mismatch -p1 \
             < ../recipe/patches/0001-surya-readdir-susfs.patch
+          patch --batch --fuzz=3 --no-backup-if-mismatch -p1 \
+            < ../recipe/patches/0002-surya-susfs-bits-header.patch
           rm -f fs/readdir.c.rej
           find . -name '*.rej' -o -name '*.orig' | sort
           if find . -name '*.rej' -print -quit | grep -q .; then

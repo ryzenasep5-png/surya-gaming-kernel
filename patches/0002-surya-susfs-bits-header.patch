@@ -1,0 +1,11 @@
+--- a/include/linux/susfs_def.h
++++ b/include/linux/susfs_def.h
+@@ -1,7 +1,7 @@
+ #ifndef KSU_SUSFS_DEF_H
+ #define KSU_SUSFS_DEF_H
+ 
+-#include <linux/bits.h>
++#include <linux/bitops.h>
+ #include <linux/bitmap.h>
+ #include <linux/string.h>
+ #include <linux/version.h> // We need check kernel version.
