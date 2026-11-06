@@ -1,0 +1,51 @@
+--- a/drivers/kernelsu/Kbuild
++++ b/drivers/kernelsu/Kbuild
+@@ -14,6 +14,7 @@
+ kernelsu-objs += su_mount_ns.o
+ kernelsu-objs += feature.o
+ kernelsu-objs += ksud.o
++kernelsu-objs += compat_susfs_hooks.o
+ kernelsu-objs += seccomp_cache.o
+ kernelsu-objs += file_wrapper.o
+ kernelsu-objs += util.o
+--- /dev/null
++++ b/drivers/kernelsu/compat_susfs_hooks.c
+@@ -0,0 +1,38 @@
++/*
++ * Compatibility shims for the SUSFS v2.3 non-GKI hook script.
++ *
++ * The v3.1 KernelSU-Next SUSFS tree does not expose the older optional
++ * init-rc/input/fstat callbacks.  SUSFS itself handles the VFS filtering;
++ * these disabled keys and no-op callbacks keep the 4.14 call sites linkable.
++ */
++#include <linux/fs.h>
++#include <linux/jump_label.h>
++#include <linux/namei.h>
++#include <linux/types.h>
++
++struct static_key_true ksu_is_init_rc_hook_enabled = {
++	.key = STATIC_KEY_INIT_FALSE,
++};
++
++struct static_key_true ksu_is_input_hook_enabled = {
++	.key = STATIC_KEY_INIT_FALSE,
++};
++
++void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr)
++{
++	(void)fd;
++	(void)kstat_size_ptr;
++}
++
++int ksu_handle_post_execveat_sucompat(int *fd,
++		struct filename **filename_ptr, void *argv, void *envp,
++		int *flags, int *retval)
++{
++	(void)fd;
++	(void)filename_ptr;
++	(void)argv;
++	(void)envp;
++	(void)flags;
++	(void)retval;
++	return 0;
++}
