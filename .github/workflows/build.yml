@@ -41,8 +41,12 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 300s sudo apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30
+          timeout 600s sudo apt-get install -y --no-install-recommends \
             bc bison flex make gcc g++ \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
             libssl-dev libelf-dev libncurses-dev \
