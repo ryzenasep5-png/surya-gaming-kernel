@@ -1,59 +1,167 @@
-name: Build Surya Gaming Kernel
+name: Build Poco X3 NFC kernel
 
 on:
   workflow_dispatch:
-    inputs:
-      memkernel_mode:
-        description: "MemKernel integration mode"
-        required: true
-        type: choice
-        options:
-          - Y
-          - N
-        default: Y
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
-      - "scripts/**"
-      - ".github/workflows/build.yml"
+      - '.github/workflows/build.yml'
+      - 'config/**'
+      - 'patches/**'
+      - 'anykernel.sh'
+      - 'README.md'
 
 permissions:
   contents: read
 
-concurrency:
-  group: surya-kernel-build-${{ github.ref }}
-  cancel-in-progress: false
+# This workflow builds the StormBreaker v8 4.14.117 source for surya/karna.
+# It uses the newest non-GKI SUSFS backport pinned below and the latest
+# KernelSU-Next commit that still contains the non-GKI SUSFS integration.
+env:
+  KERNEL_URL: https://github.com/stormbreaker-project/kernel_xiaomi_surya.git
+  KERNEL_REF: e9468f54d8cb79221d2e009a36049b414f71169b
+  KSU_URL: https://github.com/KernelSU-Next/KernelSU-Next.git
+  KSU_REF: ba4422f0556e10f40dda1887631d87a18ede4ec5
+  NONGKI_URL: https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git
+  NONGKI_REF: 732feefc0d4132bc313d39d7a511b9b7bbe51ddb
+  AK3_URL: https://github.com/stormbreaker-project/AnyKernel3.git
+  AK3_REF: 3bef00bbe39ba5c97216912c29792c4260e06315
+  CLANG_URL: https://github.com/kdrag0n/proton-clang.git
+  CLANG_REF: 9fb011b183fe7e69b04b873ef6533b4b077e3c5e
 
 jobs:
   build:
-    name: Build kernel and package AnyKernel3
-    runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      - name: Checkout repository
+      - name: Checkout build recipe
         uses: actions/checkout@v4
+        with:
+          path: recipe
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential ca-certificates cpio curl device-tree-compiler \
-            flex gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi git libelf-dev \
-            libncurses-dev libssl-dev lz4 python3 rsync unzip zip zlib1g-dev
+            bc bison flex make gcc g++ \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf \
+            libssl-dev libelf-dev libncurses-dev \
+            zip unzip cpio rsync ca-certificates git curl python3 \
+            device-tree-compiler ccache
 
-      - name: Build kernel
+      - name: Fetch StormBreaker v8 source
+        run: |
+          git init -q kernel
+          git -C kernel fetch -q --depth=1 "$KERNEL_URL" "$KERNEL_REF"
+          git -C kernel checkout -q FETCH_HEAD
+          test "$(git -C kernel rev-parse HEAD)" = "$KERNEL_REF"
+
+      - name: Fetch KernelSU-Next SUSFS-compatible source
+        run: |
+          git init -q kernel/KernelSU-Next
+          git -C kernel/KernelSU-Next fetch -q --depth=1 "$KSU_URL" "$KSU_REF"
+          git -C kernel/KernelSU-Next checkout -q --detach FETCH_HEAD
+          test "$(git -C kernel/KernelSU-Next rev-parse HEAD)" = "$KSU_REF"
+
+      - name: Fetch non-GKI SUSFS backport
+        run: |
+          mkdir nongki
+          curl -fsSL "${NONGKI_URL%.git}/archive/$NONGKI_REF.tar.gz" \
+            | tar -xz -C nongki --strip-components=1
+          test -s nongki/Patches/Patch/susfs_patch_to_4.14.patch
+          test -s nongki/Patches/susfs_inline_hook_patches.sh
+
+      - name: Fetch compiler and AnyKernel3
+        run: |
+          git init -q clang
+          git -C clang fetch -q --depth=1 "$CLANG_URL" "$CLANG_REF"
+          git -C clang checkout -q --detach FETCH_HEAD
+          git init -q anykernel
+          git -C anykernel fetch -q --depth=1 "$AK3_URL" "$AK3_REF"
+          git -C anykernel checkout -q --detach FETCH_HEAD
+          rm -rf clang/.git anykernel/.git
+
+      - name: Integrate KernelSU-Next
+        working-directory: kernel
+        run: |
+          ln -s ../KernelSU-Next/kernel drivers/kernelsu
+          printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
+          test -L drivers/kernelsu
+
+      - name: Apply SUSFS core and Surya fixup
+        working-directory: kernel
+        run: |
+          # The upstream backport has one context-only readdir hunk that does
+          # not match StormBreaker 4.14.117. It still applies the code; the
+          # local fixup supplies the declaration at the matching call site.
+          patch --batch --fuzz=3 --no-backup-if-mismatch -p1 \
+            < ../nongki/Patches/Patch/susfs_patch_to_4.14.patch || true
+          patch --batch --fuzz=3 --no-backup-if-mismatch -p1 \
+            < ../recipe/patches/0001-surya-readdir-susfs.patch
+          rm -f fs/readdir.c.rej
+          find . -name '*.rej' -o -name '*.orig' | sort
+          if find . -name '*.rej' -print -quit | grep -q .; then
+            echo 'A SUSFS hunk is still rejected; refusing to build.' >&2
+            exit 1
+          fi
+
+      - name: Apply SUSFS inline hooks
+        working-directory: kernel
+        run: |
+          bash ../nongki/Patches/susfs_inline_hook_patches.sh
+
+      - name: Merge Surya configuration
+        working-directory: kernel
         env:
-          MEMKERNEL_MODE: ${{ inputs.memkernel_mode || 'Y' }}
-        run: bash scripts/build.sh
+          ARCH: arm64
+        run: |
+          make O=out ARCH=arm64 surya-perf_defconfig
+          ../kernel/scripts/kconfig/merge_config.sh -m -O out \
+            out/.config ../recipe/config/surya-susfs.config
+          make O=out ARCH=arm64 olddefconfig
+          grep -E '^CONFIG_(KSU|KSU_SUSFS|MODULES|MODULE_FORCE_LOAD|MODULE_UNLOAD|MODULE_FORCE_UNLOAD)=' out/.config
+          grep -E '^# CONFIG_MODULE_SIG(_FORCE|_ALL)? is not set$' out/.config
+          test "$(grep -c '^CONFIG_KSU=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_KSU_SUSFS=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_MODULE_FORCE_LOAD=y$' out/.config)" -eq 1
+          test "$(grep -c '^CONFIG_MODULE_FORCE_UNLOAD=y$' out/.config)" -eq 1
+          test "$(grep -c '^# CONFIG_MODULE_SIG is not set$' out/.config)" -eq 1
 
-      - name: Upload flashable ZIP and build log
-        if: always()
+      - name: Build Image.gz-dtb
+        working-directory: kernel
+        run: |
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabihf- \
+            DTC_EXT=/usr/bin/dtc \
+            KBUILD_BUILD_USER=dsh KBUILD_BUILD_HOST=github-actions \
+            -j"$(nproc)"
+          test -s out/arch/arm64/boot/Image.gz-dtb
+          file out/arch/arm64/boot/Image.gz-dtb || true
+
+      - name: Assemble AnyKernel3 zip
+        run: |
+          cp recipe/anykernel.sh anykernel/anykernel.sh
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb anykernel/Image.gz-dtb
+          rm -f anykernel/*.zip
+          (
+            cd anykernel
+            zip -r9 "../poco-x3-stormbreaker-v8-ksunext-susfs.zip" . \
+              -x '.git/*'
+          )
+          sha256sum "poco-x3-stormbreaker-v8-ksunext-susfs.zip" \
+            | tee "poco-x3-stormbreaker-v8-ksunext-susfs.zip.sha256"
+
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: surya-gaming-kernel-build
+          name: poco-x3-stormbreaker-v8-ksunext-susfs
+          if-no-files-found: error
           path: |
-            out/*.zip
-            out/build.log
-          if-no-files-found: warn
-          retention-days: 14
+            poco-x3-stormbreaker-v8-ksunext-susfs.zip
+            poco-x3-stormbreaker-v8-ksunext-susfs.zip.sha256
+            kernel/out/.config
+            kernel/out/arch/arm64/boot/Image.gz-dtb

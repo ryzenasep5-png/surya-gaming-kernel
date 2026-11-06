@@ -1,0 +1,9 @@
+# Local build outputs
+.build/
+out/
+clang/
+anykernel/
+kernel/
+nongki/
+*.zip
+*.sha256
