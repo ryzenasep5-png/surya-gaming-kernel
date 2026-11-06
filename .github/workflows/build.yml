@@ -105,6 +105,10 @@ jobs:
             < ../recipe/patches/0001-surya-readdir-susfs.patch
           patch --batch --fuzz=3 --no-backup-if-mismatch -p1 \
             < ../recipe/patches/0002-surya-susfs-bits-header.patch
+          patch --batch --fuzz=3 --no-backup-if-mismatch -p1 \
+            < ../recipe/patches/0003-susfs-v23-ksu-compat.patch
+          patch --batch --fuzz=3 --no-backup-if-mismatch -p1 \
+            < ../recipe/patches/0004-surya-fdinfo-4.14-compat.patch
           rm -f fs/readdir.c.rej
           find . -name '*.rej' -o -name '*.orig' | sort
           if find . -name '*.rej' -print -quit | grep -q .; then

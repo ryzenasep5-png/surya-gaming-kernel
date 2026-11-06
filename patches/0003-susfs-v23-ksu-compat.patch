@@ -1,0 +1,77 @@
+--- a/fs/susfs.c
++++ b/fs/susfs.c
+@@ -302,6 +302,12 @@
+ 	SUSFS_LOGI("CMD_SUSFS_ADD_SUS_PATH -> ret: %d\n", info.err);
+ }
+ 
++/* KSU v2.0 compatibility: v2.3 handles this through the sdcard monitor. */
++void susfs_set_i_state_on_external_dir(void __user **user_info) {
++	(void)user_info;
++	SUSFS_LOGI("CMD_SUSFS_SET_*_ROOT_PATH: deprecated, no-op\n");
++}
++
+ void susfs_add_sus_path_loop(void __user **user_info) {
+ 	struct st_susfs_sus_path_list *new_list = NULL;
+ 	struct st_susfs_sus_path info = {0};
+@@ -337,7 +343,7 @@
+ 	SUSFS_LOGI("CMD_SUSFS_ADD_SUS_PATH_LOOP -> ret: %d\n", info.err);
+ }
+ 
+-static void susfs_run_sus_path_loop(void) {
++static void susfs_run_sus_path_loop_internal(void) {
+ 	struct st_susfs_sus_path_list *cursor = NULL;
+ 	struct path path;
+ 	struct inode *inode;
+@@ -377,6 +383,11 @@
+ 	revert_creds(saved);
+ }
+ 
++void susfs_run_sus_path_loop(uid_t uid) {
++	(void)uid;
++	susfs_run_sus_path_loop_internal();
++}
++
+ static inline bool is_i_uid_not_allowed(uid_t i_uid) {
+ 	return likely(current_uid().val != i_uid);
+ }
+@@ -472,6 +483,10 @@
+ }
+ #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+ 
++/* KSU v2.0 compatibility: v2.3 derives non-sus mount ids at use sites. */
++void susfs_reorder_mnt_id(void) {
++}
++
+ /* sus_kstat */
+ #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+ static DEFINE_MUTEX(susfs_mutex_lock_sus_kstat);
+@@ -2198,7 +2213,7 @@
+ 	if (!ksu_cred)
+ 		return;
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+-	susfs_run_sus_path_loop();
++	susfs_run_sus_path_loop_internal();
+ #endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ }
+ 
+--- a/include/linux/susfs.h
++++ b/include/linux/susfs.h
+@@ -201,13 +201,18 @@
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ void susfs_add_sus_path(void __user **user_info);
+ void susfs_add_sus_path_loop(void __user **user_info);
++void susfs_run_sus_path_loop(uid_t uid);
+ #endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+ 
+ /* sus_mount */
+ #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+ void susfs_set_hide_sus_mnts_for_non_su_procs(void __user **user_info);
++void susfs_reorder_mnt_id(void);
+ #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+ 
++/* KSU v2.0 deprecated command compatibility */
++void susfs_set_i_state_on_external_dir(void __user **user_info);
++
+ /* sus_kstat */
+ #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+ void susfs_add_sus_kstat(void __user **user_info);
